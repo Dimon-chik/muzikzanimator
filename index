@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Кабинет музыки</title>
+
+  <!-- ══════════════════════════════════════════════════
+       🔥 ШАГ 1: ВСТАВЬ СЮДА СВОЙ КОНФИГ ИЗ FIREBASE
+       Идёшь на firebase.google.com → твой проект →
+       Настройки (шестерёнка) → Общие → Твои приложения
+       → </> Web → скопируй объект firebaseConfig
+  ═══════════════════════════════════════════════════ -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+    import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey:            "AIzaSyAr-1_929lBGFMuG4VdVVSztqLPo_7ubhc",
+      authDomain:        "muzika676769696.firebaseapp.com",
+      // ▼ Найди это в Firebase Console → Realtime Database → вверху страницы
+      // Выглядит так: https://muzika676769696-default-rtdb.firebaseio.com
+      databaseURL:       "https://muzika676769696-default-rtdb.firebaseio.com",
+      projectId:         "muzika676769696",
+      storageBucket:     "muzika676769696.firebasestorage.app",
+      messagingSenderId: "1072625575710",
+      appId:             "1:1072625575710:web:a593a946e6f45e4247cb0f",
+      measurementId:     "G-8W3K4VETN2"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getDatabase(app);
+
+    // ── helpers ──────────────────────────────────────
+
+    function getWeekKey() {
+      const d   = new Date();
+      const day = d.getDay();
+      const mon = new Date(d);
+      mon.setDate(d.getDate() - day + (day === 0 ? -6 : 1));
+      mon.setHours(0, 0, 0, 0);
+      const jan1 = new Date(mon.getFullYear(), 0, 1);
+      const wn   = Math.ceil((((mon - jan1) / 86400000) + 1) / 7);
+      return `${mon.getFullYear()}-W${String(wn).padStart(2, "0")}`;
+    }
+
+    function isOpen() {
+      const d   = new Date();
+      const day = d.getDay(); // 0=Вс 1=Пн … 4=Чт 5=Пт 6=Сб
+      const h   = d.getHours();
+      const m   = d.getMinutes();
+      const beforeDeadline = (h < 9) || (h === 9 && m < 10);
+      // Открыто: Чт 10:00 → Ср 9:10
+      if (day === 4 && h >= 10)                      return true;
+      if (day === 5 || day === 6 || day === 0)        return true;
+      if (day === 1 || day === 2)                     return true;
+      if (day === 3 && beforeDeadline)               return true;
+      return false;
+    }
+
+    function nextOpenMsg() {
+      const d   = new Date();
+      const day = d.getDay();
+      const h   = d.getHours();
+      const m   = d.getMinutes();
+      const afterDeadline = h > 9 || (h === 9 && m >= 10);
+      if (day === 3 && afterDeadline) return "Запись откроется в четверг в 10:00";
+      if (day === 4 && h < 10)        return "Запись откроется сегодня в 10:00";
+      return "Запись закрыта";
+    }
+
+    // ── state ────────────────────────────────────────
+
+    let seats    = {};   // { "row-col": "Фамилия Имя" }
+    let userName = localStorage.getItem("music_userName") || null;
+
+    // ── render ───────────────────────────────────────
+
+    function render() {
+      if (!userName) { renderNameScreen(); return; }
+      renderApp();
+    }
+
+    function renderNameScreen() {
+      document.getElementById("root").innerHTML = `
+        <div class="name-screen">
+          <div class="name-card">
+            <span class="music-icon">🎼</span>
+            <h2>Кабинет музыки</h2>
+            <p class="subtitle">Занимай место на урок<br>каждую среду 9:20–10:00</p>
+            <p class="prompt">Как тебя зовут?</p>
+            <input id="nameInput" class="name-input" placeholder="Фамилия Имя" autofocus />
+            <p id="nameError" class="name-error"></p>
+            <button id="enterBtn" class="enter-btn">Войти</button>
+            <p class="hint-text">Твоё имя увидят одноклассники на карте мест</p>
+          </div>
+        </div>`;
+
+      const input = document.getElementById("nameInput");
+      const btn   = document.getElementById("enterBtn");
+      const err   = document.getElementById("nameError");
+
+      function tryEnter() {
+        const name = input.value.trim();
+        if (name.split(/\s+/).filter(Boolean).length < 2) {
+          err.textContent = "Введи Фамилию и Имя через пробел";
+          return;
+        }
+        err.textContent = "";
+        localStorage.setItem("music_userName", name);
+        userName = name;
+        render();
+      }
+      btn.addEventListener("click", tryEnter);
+      input.addEventListener("keydown", e => { if (e.key === "Enter") tryEnter(); });
+    }
+
+    function renderApp() {
+      const open    = isOpen();
+      const myKey   = Object.entries(seats).find(([, v]) => v === userName)?.[0];
+      const myParsed = myKey ? myKey.split("-").map(Number) : null;
+      const takenN  = Object.keys(seats).length;
+
+      const rowLabels = ["Ряд 1 (передний)", "Ряд 2", "Ряд 3", "Ряд 4 (задний)"];
+      const rowShort  = ["Р1", "Р2", "Р3", "Р4"];
+
+      let rowsHtml = "";
+      for (let r = 0; r < 4; r++) {
+        let seatsHtml = "";
+        for (let c = 0; c < 8; c++) {
+          const key      = `${r}-${c}`;
+          const occupant = seats[key];
+          const isMe     = occupant === userName;
+          const cls      = isMe ? "mine" : occupant ? "taken" : "free";
+          const titleTxt = occupant
+            ? (isMe ? "Твоё место — нажми чтобы освободить" : `Занято: ${occupant}`)
+            : `${rowShort[r]}, место ${c + 1}`;
+          seatsHtml += `<button class="seat ${cls}" data-key="${key}" title="${titleTxt}">${c + 1}</button>`;
+        }
+        rowsHtml += `
+          <div class="row-group">
+            <div class="row-label">${rowLabels[r]}</div>
+            <div class="seats-row">${seatsHtml}</div>
+          </div>`;
+      }
+
+      const mySeatBar = myParsed ? `
+        <div class="my-seat-bar">
+          <span>⭐ Твоё место: ${rowLabels[myParsed[0]]}, место ${myParsed[1] + 1}</span>
+          ${open ? `<button id="releaseBtn" class="release-btn">Освободить</button>` : ""}
+        </div>` : "";
+
+      document.getElementById("root").innerHTML = `
+        <div class="app">
+          <div class="header">
+            <div class="header-left">
+              <h1>🎵 Кабинет музыки</h1>
+              <p>Урок каждую среду · 9:20–10:00</p>
+            </div>
+            <div id="userChip" class="user-chip" title="Нажми чтобы сменить имя">
+              <span>👤</span><span>${userName}</span>
+            </div>
+          </div>
+
+          <div class="content">
+            <div class="status-bar ${open ? "open" : "closed"}">
+              <div class="dot ${open ? "green" : "red"}"></div>
+              <span>${open
+                ? "Запись открыта — нажми на место чтобы занять"
+                : nextOpenMsg()}</span>
+            </div>
+
+            ${mySeatBar}
+
+            <div class="legend">
+              <div class="legend-item">
+                <div class="legend-swatch" style="background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.1)"></div>
+                <span>Свободно</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-swatch" style="background:rgba(255,69,58,0.15);border-color:rgba(255,69,58,0.4)"></div>
+                <span>Занято</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-swatch" style="background:rgba(212,168,67,0.2);border-color:rgba(212,168,67,0.7)"></div>
+                <span>Твоё место</span>
+              </div>
+            </div>
+
+            <div class="classroom">
+              <div class="board">🎹 Доска · Учитель</div>
+              ${rowsHtml}
+              <div class="stats">Занято ${takenN} из 32 мест${takenN > 0 ? ` · ${32 - takenN} свободно` : ""}</div>
+            </div>
+          </div>
+        </div>`;
+
+      // events
+      document.querySelectorAll(".seat").forEach(btn => {
+        btn.addEventListener("click", () => handleSeatClick(btn.dataset.key));
+      });
+      document.getElementById("userChip")?.addEventListener("click", handleChangeName);
+      document.getElementById("releaseBtn")?.addEventListener("click", () => {
+        if (myKey) handleSeatClick(myKey);
+      });
+    }
+
+    // ── seat logic ───────────────────────────────────
+
+    function showToast(msg, type = "info") {
+      let t = document.getElementById("toast");
+      if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.appendChild(t); }
+      t.className = `toast ${type}`;
+      t.textContent = msg;
+      t.style.display = "block";
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => { t.style.display = "none"; }, 3500);
+    }
+
+    async function handleSeatClick(key) {
+      if (!isOpen()) { showToast(nextOpenMsg(), "error"); return; }
+
+      const occupant = seats[key];
+      const myKey    = Object.entries(seats).find(([, v]) => v === userName)?.[0];
+
+      if (occupant) {
+        if (occupant === userName) {
+          const newSeats = { ...seats };
+          delete newSeats[key];
+          await saveSeats(newSeats);
+          showToast("Место освобождено", "info");
+        } else {
+          showToast(`Занято: ${occupant}`, "info");
+        }
+        return;
+      }
+
+      const newSeats = { ...seats };
+      if (myKey) delete newSeats[myKey];
+      newSeats[key] = userName;
+      await saveSeats(newSeats);
+      const [r, c] = key.split("-").map(Number);
+      showToast(`Р${r + 1}, место ${c + 1} — занято! 🎵`, "success");
+    }
+
+    function handleChangeName() {
+      const myKey = Object.entries(seats).find(([, v]) => v === userName)?.[0];
+      if (myKey) {
+        const newSeats = { ...seats };
+        delete newSeats[myKey];
+        saveSeats(newSeats);
+      }
+      localStorage.removeItem("music_userName");
+      userName = null;
+      render();
+    }
+
+    // ── firebase ─────────────────────────────────────
+
+    async function saveSeats(newSeats) {
+      const week = getWeekKey();
+      try {
+        await set(ref(db, "classroom"), { week, seats: newSeats });
+        seats = newSeats;
+        render();
+      } catch (e) {
+        showToast("Ошибка сохранения — проверь интернет", "error");
+      }
+    }
+
+    // real-time listener — обновляет карту у всех
+    onValue(ref(db, "classroom"), (snapshot) => {
+      const data = snapshot.val();
+      if (!data) { seats = {}; render(); return; }
+      // auto-reset if new week
+      const curWeek = getWeekKey();
+      if (data.week !== curWeek) {
+        set(ref(db, "classroom"), { week: curWeek, seats: {} });
+        seats = {};
+      } else {
+        seats = data.seats || {};
+      }
+      render();
+    });
+
+    // first render (while firebase loads)
+    render();
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600;700&family=Golos+Text:wght@400;500;600&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0e1117;
+      min-height: 100vh;
+      font-family: 'Golos Text', sans-serif;
+    }
+
+    /* ── app shell ── */
+    .app { min-height: 100vh; background: #0e1117; color: #e8e0d0; padding-bottom: 40px; }
+
+    .header {
+      background: linear-gradient(180deg, #1a1208, #0e1117);
+      border-bottom: 1px solid #2a2010;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header-left h1 {
+      font-family: 'Unbounded', sans-serif;
+      font-size: 15px;
+      font-weight: 700;
+      color: #d4a843;
+      letter-spacing: .05em;
+    }
+    .header-left p { font-size: 11px; color: #4a4030; margin-top: 3px; }
+
+    .user-chip {
+      background: rgba(212,168,67,.1);
+      border: 1px solid rgba(212,168,67,.25);
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 12px;
+      color: #d4a843;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: background .2s;
+    }
+    .user-chip:hover { background: rgba(212,168,67,.18); }
+
+    .content { max-width: 680px; margin: 0 auto; padding: 20px 16px 0; }
+
+    /* ── status bar ── */
+    .status-bar {
+      border-radius: 12px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .status-bar.open  { background: rgba(52,199,89,.1);  border: 1px solid rgba(52,199,89,.25); color: #34c759; }
+    .status-bar.closed{ background: rgba(255,69,58,.1);  border: 1px solid rgba(255,69,58,.2);  color: #ff6b6b; }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.green { background: #34c759; box-shadow: 0 0 6px #34c759; animation: pulse 2s infinite; }
+    .dot.red   { background: #ff453a; box-shadow: 0 0 6px #ff453a; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* ── my seat bar ── */
+    .my-seat-bar {
+      background: rgba(212,168,67,.08);
+      border: 1px solid rgba(212,168,67,.2);
+      border-radius: 10px;
+      padding: 10px 14px;
+      margin-bottom: 16px;
+      font-size: 12px;
+      color: #d4a843;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .release-btn {
+      background: none;
+      border: 1px solid rgba(212,168,67,.35);
+      color: rgba(212,168,67,.7);
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: 'Golos Text', sans-serif;
+      transition: all .15s;
+    }
+    .release-btn:hover { background: rgba(212,168,67,.12); color: #d4a843; }
+
+    /* ── legend ── */
+    .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #5a5040; }
+    .legend-swatch { width: 16px; height: 14px; border-radius: 4px; border: 1px solid; }
+
+    /* ── classroom ── */
+    .classroom {
+      background: rgba(255,255,255,.02);
+      border: 1px solid rgba(255,255,255,.07);
+      border-radius: 16px;
+      padding: 20px 16px;
+    }
+    .board {
+      background: linear-gradient(90deg, #1a2e1a, #223322, #1a2e1a);
+      border: 2px solid #2d4a2d;
+      border-radius: 8px;
+      padding: 10px 0;
+      text-align: center;
+      font-size: 11px;
+      color: #5a8a5a;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      margin-bottom: 28px;
+      font-family: 'Unbounded', sans-serif;
+    }
+    .row-group { margin-bottom: 14px; }
+    .row-label {
+      font-size: 10px;
+      color: #3a3020;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      text-align: center;
+      margin-bottom: 6px;
+      font-family: 'Unbounded', sans-serif;
+      font-weight: 600;
+    }
+    .seats-row { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+
+    .seat {
+      width: 46px;
+      height: 42px;
+      border-radius: 8px;
+      border: 1px solid;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'Golos Text', sans-serif;
+      transition: transform .1s, box-shadow .1s, background .15s;
+    }
+    .seat:active { transform: scale(.92); }
+    .seat.free  { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.1);    color: rgba(255,255,255,.3); }
+    .seat.free:hover { background: rgba(212,168,67,.12); border-color: rgba(212,168,67,.4); color: rgba(212,168,67,.8); box-shadow: 0 0 12px rgba(212,168,67,.15); }
+    .seat.taken { background: rgba(255,69,58,.15);  border-color: rgba(255,69,58,.4);       color: rgba(255,100,90,.9); cursor: default; }
+    .seat.mine  { background: rgba(212,168,67,.2);  border-color: rgba(212,168,67,.7);      color: #d4a843; box-shadow: 0 0 14px rgba(212,168,67,.2); }
+
+    .stats { text-align: center; margin-top: 18px; font-size: 11px; color: #3a3020; }
+
+    /* ── name screen ── */
+    .name-screen {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0e1117;
+      padding: 20px;
+    }
+    .name-card {
+      background: #16120a;
+      border: 1px solid #2a2010;
+      border-radius: 20px;
+      padding: 40px 32px;
+      max-width: 360px;
+      width: 100%;
+      text-align: center;
+    }
+    .music-icon  { font-size: 52px; margin-bottom: 12px; display: block; }
+    .name-card h2 {
+      font-family: 'Unbounded', sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      color: #d4a843;
+      margin-bottom: 6px;
+    }
+    .subtitle   { font-size: 12px; color: #4a4030; margin-bottom: 28px; line-height: 1.6; }
+    .prompt     { font-size: 13px; color: #8a7a60; margin-bottom: 12px; }
+    .name-input {
+      width: 100%;
+      padding: 12px 16px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid #2a2010;
+      border-radius: 10px;
+      color: #e8e0d0;
+      font-size: 15px;
+      font-family: 'Golos Text', sans-serif;
+      outline: none;
+      margin-bottom: 8px;
+      transition: border-color .2s;
+    }
+    .name-input:focus    { border-color: #d4a843; }
+    .name-input::placeholder { color: #3a3020; }
+    .name-error { font-size: 12px; color: #ff6b6b; min-height: 18px; margin-bottom: 8px; }
+    .enter-btn {
+      width: 100%;
+      padding: 12px;
+      background: linear-gradient(135deg, #d4a843, #c49030);
+      border: none;
+      border-radius: 10px;
+      color: #0e1117;
+      font-size: 15px;
+      font-weight: 700;
+      font-family: 'Unbounded', sans-serif;
+      cursor: pointer;
+      letter-spacing: .03em;
+      transition: opacity .2s, transform .1s;
+    }
+    .enter-btn:hover  { opacity: .9; }
+    .enter-btn:active { transform: scale(.98); }
+    .hint-text { font-size: 11px; color: #3a3020; margin-top: 10px; }
+
+    /* ── toast ── */
+    .toast {
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      border-radius: 10px;
+      padding: 11px 22px;
+      font-size: 13px;
+      font-weight: 500;
+      font-family: 'Golos Text', sans-serif;
+      box-shadow: 0 6px 24px rgba(0,0,0,.5);
+      z-index: 9999;
+      white-space: nowrap;
+      display: none;
+    }
+    .toast.success { background: #1c3a1c; border: 1px solid #34c759; color: #34c759; }
+    .toast.error   { background: #2a1010; border: 1px solid #ff453a; color: #ff6b6b; }
+    .toast.info    { background: #1a1608; border: 1px solid #d4a843; color: #d4a843; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>
